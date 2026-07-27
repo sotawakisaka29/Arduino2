@@ -1,153 +1,202 @@
 #include <Wire.h>
 #include <ZumoShieldN.h>
 
+#define WIDTH 3
+#define HEIGHT 2
 #define MAX_COMMAND 10
 
-int speed = 50;
-int threshold = 300;
-int index = 0;
-int i;
-
-// const int width = 3;
-// const int height = 3;
-
-// struct Vec {
+// struct vec {
 //   int x;
 //   int y;
 // };
 
-// const int R[2][2] = {
-//   {0,1},
-//   {-1,0}
+// enum DIR {
+//   NORTH,
+//   EAST,
+//   SOUTH,
+//   WEST
 // };
 
-// const int L[2][2] = {
-//   {0, -1},
-//   {1, 0}
-// };
+vec cur = {0, 0};      // 現在位置
+vec goal;              // 目標位置
 
-// const int F[2][2] = {
-//   {1, 0},
-//   {0, 1}
-// };
-
+DIR dir = NORTH;       // 初期方位
 
 char com[MAX_COMMAND];
-int cmdIndex = 0;
+int commandLength = 0;
 
-void setup() {
-  Serial.begin(9600);
+// ProgramB.ino に実装
+extern void runRoute(void);
+extern void calibrateCompass(void);
 
-  buzzer.playOn(); 
-  Serial.println("Input Available");
-  getCommand();
+//==================================================
+// 座標差分
+//==================================================
 
-  Serial.println("Push button to start.");
-  button.waitForButton();
+vec difference(vec current, vec destination) {
+  vec dif;
 
-  buzzer.playOn();
+  dif.x = destination.x - current.x;
+  dif.y = destination.y - current.y;
+
+  return dif;
 }
 
-// void turnFunc(const int M[2][2], Vec *v){
-//   int nx = M[0][0] * v->x + M[0][1] * v->y;
-//   int ny = M[1][0] * v->x + M[1][1] * v->y;
+//==================================================
+// コマンド追加
+//==================================================
 
-//   v->x = nx;  //(v*).xと同じ
-//   v->y = ny;  //(v*).yと同じ
-// }
-
-// bool judge(){
-//   Vec pos = {0, 0};  // P0
-//   Vec dir = {0, 1};  // r0
-
-//   for(int i = 0; i < cmdIndex; i++){
-//     switch(com[i])
-//     {
-//       case 'r':
-//         turnFunc(R, &dir);  //&dirはdirが入ってるポインタ
-//         break;
-
-//       case 'l':
-//         turnFunc(L, &dir);
-//         break;
-
-//       case 'f':
-//         turnFunc(F, &dir);
-//         break;
-//     }
-
-//     pos.x += dir.x;
-//     pos.y += dir.y;
-
-//     // ここにコースアウト条件を書く
-//     if(pos.x < 0 || pos.x > width ||
-//        pos.y < 0 || pos.y > height)
-//     {
-//       return false;
-//     }
-//   }
-
-//   return true;
-// }
-
-void loop() {
-  function();
+void addCommand(char c)
+{
+  if (commandLength < MAX_COMMAND - 1)
+  {
+    com[commandLength++] = c;
+    com[commandLength] = '\0';
+  }
 }
 
+//==================================================
+// 指定方向へ向くためのコマンド生成
+//==================================================
 
-void getCommand(void){
-  cmdIndex = 0;
+void turnTo(DIR target)
+{
+  int diff = (target - dir + 4) % 4;
 
-  while (1) {
-    if (Serial.available() > 0) {
-      char input = Serial.read();
+  if (diff == 1)
+  {
+    addCommand('r');
+  }
+  else if (diff == 2)
+  {
+    addCommand('r');
+    addCommand('r');
+  }
+  else if (diff == 3)
+  {
+    addCommand('l');
+  }
 
-      if (input == '\n' || input == '\r') {
-        continue;
-      }
+  dir = target;
+}
 
-      if (cmdIndex >= MAX_COMMAND) {
-        cmdIndex = 0;
-        Serial.println("Over Max Command. Delete All Command!");
-      }
+//==================================================
+// 最短経路生成
+// （3×4グリッド・障害物無し）
+//==================================================
 
-      if (input == 'd') {
-        cmdIndex = 0;
-        Serial.println("Delete All Command!");
-      }
-      else if (input == 'r' || input == 'l' || input == 'f') {
+void createRoute()
+{
+  commandLength = 0;
+  com[0] = '\0';
 
-        // 一旦コマンドを追加
-        com[cmdIndex++] = input;
-        com[cmdIndex] = '\0';
+  vec dif = difference(cur, goal);
 
-        // 追加後の状態で判定
-        if (!judge()) {
-          Serial.println("ERROR : Course Out!");
+  // X方向移動
 
-          // 追加したコマンドを取り消す
-          cmdIndex--;
-          com[cmdIndex] = '\0';
+  if (dif.x > 0)
+  {
+    turnTo(EAST);
 
-          Serial.println("Re-Input Command!");
-        }else {
-          Serial.print("Current Command : ");
-          Serial.println(com);
-        }
+    for (int i = 0; i < dif.x; i++)
+    {
+      addCommand('f');
+    }
+  }
+  else if (dif.x < 0)
+  {
+    turnTo(WEST);
 
-      }
-      else if (input == '.') {
-        com[cmdIndex] = '\0';
+    for (int i = 0; i < -dif.x; i++)
+    {
+      addCommand('f');
+    }
+  }
 
-        Serial.print("Command : ");
-        Serial.println(com);
-        break;
-      }
-      else {
-        Serial.println("Wrong Command!");
-      }
+  // Y方向移動
+
+  if (dif.y > 0)
+  {
+    turnTo(NORTH);
+
+    for (int i = 0; i < dif.y; i++)
+    {
+      addCommand('f');
+    }
+  }
+  else if (dif.y < 0)
+  {
+    turnTo(SOUTH);
+
+    for (int i = 0; i < -dif.y; i++)
+    {
+      addCommand('f');
     }
   }
 }
 
+//==================================================
+// 目的地入力
+//==================================================
 
+void getGoal()
+{
+  Serial.println("Input Goal X (0-3)");
+
+  while (!Serial.available());
+  goal.x = Serial.parseInt();
+
+  Serial.println(goal.x);
+
+  Serial.println("Input Goal Y (0-2)");
+
+  while (!Serial.available());
+  goal.y = Serial.parseInt();
+
+  Serial.println(goal.y);
+}
+
+//==================================================
+// setup
+//==================================================
+
+void setup()
+{
+  Serial.begin(9600);
+
+  imu.begin();
+
+  // 地磁気用設定
+  imu.configureForCompassHeading();
+
+  reflectances.init();
+
+  buzzer.playOn();
+
+  Serial.println("===== Route Setting =====");
+
+  getGoal();
+
+  createRoute();
+
+  Serial.print("Generated Command : ");
+  Serial.println(com);
+
+  Serial.println("Push button to calibrate compass and start.");
+  button.waitForButton();
+
+  calibrateCompass();
+
+  Serial.println("Start running.");
+
+  buzzer.playOn();
+}
+
+//==================================================
+// loop
+//==================================================
+
+void loop()
+{
+  runRoute();
+}
