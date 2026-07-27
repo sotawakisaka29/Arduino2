@@ -25,6 +25,9 @@ float KpGap = 1.5;
 
 const int TURN_SPEED = 100;
 const float TURN_TOLERANCE_DEG = 1.0;
+const float GYRO_TURN_ANGLE_DEG = 90.0;
+const float GYRO_TURN_TOLERANCE_DEG = 2.0;
+const unsigned long TURN_SETTLE_MS = 150;
 const unsigned long TURN_TIMEOUT_MS = 8000;
 const unsigned long BLOCK_TIMEOUT_MS = 15000;
 const unsigned long GAP_TIMEOUT_MS = 5000;
@@ -311,23 +314,25 @@ float shortestHeadingError(float target, float current)
   return error;
 }
 
-bool rotateToDirection(DIR target)
+bool rotateToDirection(DIR target, float gyroTargetAngle)
 {
   float targetHeading = headingForDirection(target);
   unsigned long startedAt = millis();
 
-  // キャリブレーション済みの地磁気方位と目標方位を比較し、
-  // 一定速度で単純にその場旋回する。
+  // 地磁気から絶対的な目標方位を決め、ジャイロで相対的に
+  // 90度回転する。旋回中の終了判定にはジャイロを使用する。
+  imu.turnSensorReset();
+
   while (true)
   {
-    float heading = getHeading();
-    float error = shortestHeadingError(targetHeading, heading);
+    imu.turnSensorUpdate();
 
-    if (abs(error) <= TURN_TOLERANCE_DEG)
+    float gyroAngle = imu.turnSensorAngleDegree();
+    float gyroError = gyroTargetAngle - gyroAngle;
+
+    if (abs(gyroError) <= GYRO_TURN_TOLERANCE_DEG)
     {
-      motors.setSpeeds(0, 0);
-      dir = target;
-      return true;
+      break;
     }
 
     if (millis() - startedAt > TURN_TIMEOUT_MS)
@@ -337,7 +342,8 @@ bool rotateToDirection(DIR target)
       return false;
     }
 
-    if (error > 0.0)
+    // ジャイロは反時計回りが正。
+    if (gyroError < 0.0)
     {
       motors.setSpeeds(TURN_SPEED, -TURN_SPEED);
     }
@@ -346,18 +352,45 @@ bool rotateToDirection(DIR target)
       motors.setSpeeds(-TURN_SPEED, TURN_SPEED);
     }
   }
+
+  motors.setSpeeds(0, 0);
+
+  // 停止後の惰性による回転もジャイロ角度へ反映する。
+  unsigned long settleStartedAt = millis();
+  while (millis() - settleStartedAt < TURN_SETTLE_MS)
+  {
+    imu.turnSensorUpdate();
+  }
+
+  // モーター停止後に、地磁気で絶対方位を確認する。
+  float finalGyroAngle = imu.turnSensorAngleDegree();
+  float finalHeading = getHeading();
+  float compassError = shortestHeadingError(targetHeading, finalHeading);
+
+  Serial.print(F("Turn gyro angle: "));
+  Serial.println(finalGyroAngle);
+  Serial.print(F("Turn compass error: "));
+  Serial.println(compassError);
+
+  if (abs(compassError) > TURN_TOLERANCE_DEG)
+  {
+    Serial.println(F("WARNING: Compass heading is outside tolerance."));
+  }
+
+  dir = target;
+  return true;
 }
 
 bool turnRight()
 {
   DIR target = (DIR)((dir + 1) % 4);
-  return rotateToDirection(target);
+  return rotateToDirection(target, -GYRO_TURN_ANGLE_DEG);
 }
 
 bool turnLeft()
 {
   DIR target = (DIR)((dir + 3) % 4);
-  return rotateToDirection(target);
+  return rotateToDirection(target, GYRO_TURN_ANGLE_DEG);
 }
 
 //==================================================
