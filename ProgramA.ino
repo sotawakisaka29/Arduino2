@@ -1,163 +1,143 @@
 #include <Wire.h>
 #include <ZumoShieldN.h>
+#include "ProgramTypes.h"
 
-#define WIDTH 3
-#define HEIGHT 2
-#define MAX_COMMAND 10
+#define MAX_TARGET 20
 
-// struct vec {
-//   int x;
-//   int y;
-// };
+MODE mode = COMMAND_INPUT_MODE;
 
-// enum DIR {
-//   NORTH,
-//   EAST,
-//   SOUTH,
-//   WEST
-// };
+char targetLabels[MAX_TARGET + 1];
+int targetCount = 0;
 
-vec cur = {0, 0};      // 現在位置
-vec goal;              // 目標位置
-
-DIR dir = NORTH;       // 初期方位
-
-char com[MAX_COMMAND];
-int commandLength = 0;
-
-// ProgramB.ino に実装
-extern void runRoute(void);
-extern void calibrateCompass(void);
+// ProgramB.ino に実装された運行関数
+extern void runOperation(void);
 
 //==================================================
-// 座標差分
+// 地点名を座標に変換
 //==================================================
 
-vec difference(vec current, vec destination) {
-  vec dif;
-
-  dif.x = destination.x - current.x;
-  dif.y = destination.y - current.y;
-
-  return dif;
-}
-
-//==================================================
-// コマンド追加
-//==================================================
-
-void addCommand(char c)
+bool labelToVec(char label, vec *p)
 {
-  if (commandLength < MAX_COMMAND - 1)
+  switch (label)
   {
-    com[commandLength++] = c;
-    com[commandLength] = '\0';
+    case '0': p->x = 0; p->y = 0; return true;
+    case '1': p->x = 1; p->y = 0; return true;
+    case '2': p->x = 2; p->y = 0; return true;
+    case '3': p->x = 3; p->y = 0; return true;
+    case '4': p->x = 0; p->y = 1; return true;
+    case '5': p->x = 1; p->y = 1; return true;
+    case '6': p->x = 2; p->y = 1; return true;
+    case '7': p->x = 3; p->y = 1; return true;
+    case '8': p->x = 0; p->y = 2; return true;
+    case '9': p->x = 1; p->y = 2; return true;
+
+    case 'a':
+    case 'A':
+      p->x = 2;
+      p->y = 2;
+      return true;
+
+    case 'b':
+    case 'B':
+      p->x = 3;
+      p->y = 2;
+      return true;
   }
+
+  return false;
 }
 
-//==================================================
-// 指定方向へ向くためのコマンド生成
-//==================================================
-
-void turnTo(DIR target)
+char normalizeLabel(char label)
 {
-  int diff = (target - dir + 4) % 4;
-
-  if (diff == 1)
-  {
-    addCommand('r');
-  }
-  else if (diff == 2)
-  {
-    addCommand('r');
-    addCommand('r');
-  }
-  else if (diff == 3)
-  {
-    addCommand('l');
-  }
-
-  dir = target;
+  if (label == 'A') return 'a';
+  if (label == 'B') return 'b';
+  return label;
 }
 
 //==================================================
-// 最短経路生成
-// （3×4グリッド・障害物無し）
+// コマンド入力モード
 //==================================================
 
-void createRoute()
+void clearTargets()
 {
-  commandLength = 0;
-  com[0] = '\0';
-
-  vec dif = difference(cur, goal);
-
-  // X方向移動
-
-  if (dif.x > 0)
-  {
-    turnTo(EAST);
-
-    for (int i = 0; i < dif.x; i++)
-    {
-      addCommand('f');
-    }
-  }
-  else if (dif.x < 0)
-  {
-    turnTo(WEST);
-
-    for (int i = 0; i < -dif.x; i++)
-    {
-      addCommand('f');
-    }
-  }
-
-  // Y方向移動
-
-  if (dif.y > 0)
-  {
-    turnTo(NORTH);
-
-    for (int i = 0; i < dif.y; i++)
-    {
-      addCommand('f');
-    }
-  }
-  else if (dif.y < 0)
-  {
-    turnTo(SOUTH);
-
-    for (int i = 0; i < -dif.y; i++)
-    {
-      addCommand('f');
-    }
-  }
+  targetCount = 0;
+  targetLabels[0] = '\0';
 }
 
-//==================================================
-// 目的地入力
-//==================================================
-
-void getGoal()
+void printInputPrompt()
 {
-  Serial.println("Input Goal X (0-3)");
+  Serial.println(F("===== Command Input Mode ====="));
+  Serial.println(F("Input intersection numbers (0-9, a, b)."));
+  Serial.println(F("'*' : clear all commands"));
+  Serial.println(F("'.' : finish input"));
+  Serial.println(F("Example: 159b."));
+}
 
-  while (!Serial.available());
-  goal.x = Serial.parseInt();
+void getCommand()
+{
+  clearTargets();
+  printInputPrompt();
 
-  Serial.println(goal.x);
+  while (true)
+  {
+    if (Serial.available() == 0)
+    {
+      continue;
+    }
 
-  Serial.println("Input Goal Y (0-2)");
+    char input = Serial.read();
 
-  while (!Serial.available());
-  goal.y = Serial.parseInt();
+    if (input == '\n' || input == '\r')
+    {
+      continue;
+    }
 
-  Serial.println(goal.y);
+    if (input == '*')
+    {
+      clearTargets();
+      Serial.println(F("Command cleared."));
+      continue;
+    }
+
+    if (input == '.')
+    {
+      if (targetCount == 0)
+      {
+        Serial.println(F("ERROR: Enter at least one destination."));
+        continue;
+      }
+
+      break;
+    }
+
+    vec unused;
+    if (!labelToVec(input, &unused))
+    {
+      Serial.println(F("ERROR: Unsupported command."));
+      continue;
+    }
+
+    if (targetCount >= MAX_TARGET)
+    {
+      clearTargets();
+      Serial.println(F("ERROR: Too many commands. All commands were cleared."));
+      continue;
+    }
+
+    input = normalizeLabel(input);
+    targetLabels[targetCount++] = input;
+    targetLabels[targetCount] = '\0';
+
+    Serial.print(F("Command: "));
+    Serial.println(targetLabels);
+  }
+
+  Serial.print(F("Input command: "));
+  Serial.println(targetLabels);
 }
 
 //==================================================
-// setup
+// Arduino setup / loop
 //==================================================
 
 void setup()
@@ -165,38 +145,23 @@ void setup()
   Serial.begin(9600);
 
   imu.begin();
-
-  // 地磁気用設定
   imu.configureForCompassHeading();
-
   reflectances.init();
 
   buzzer.playOn();
 
-  Serial.println("===== Route Setting =====");
+  mode = COMMAND_INPUT_MODE;
+  getCommand();
 
-  getGoal();
-
-  createRoute();
-
-  Serial.print("Generated Command : ");
-  Serial.println(com);
-
-  Serial.println("Push button to calibrate compass and start.");
-  button.waitForButton();
-
-  calibrateCompass();
-
-  Serial.println("Start running.");
-
-  buzzer.playOn();
+  mode = ROUTE_GENERATION_MODE;
 }
-
-//==================================================
-// loop
-//==================================================
 
 void loop()
 {
-  runRoute();
+  if (mode == ROUTE_GENERATION_MODE)
+  {
+    // 入力完了後の経路生成・校正・走行はProgramBへ任せる。
+    runOperation();
+    mode = FINISHED_MODE;
+  }
 }

@@ -1,357 +1,611 @@
 #include <Wire.h>
 #include <ZumoShieldN.h>
+#include "ProgramTypes.h"
 
-struct vec {
-  int x;
-  int y;
-};
+#define MAX_ROUTE_COMMAND 160
 
-enum DIR {
-  NORTH,
-  EAST,
-  SOUTH,
-  WEST
-};
+extern char targetLabels[];
+extern int targetCount;
+extern MODE mode;
+extern bool labelToVec(char label, vec *p);
 
-extern char com[];
-extern vec cur;
-extern vec goal;
-extern DIR dir;
+vec cur = {0, 0};
+vec goal = {0, 0};
+DIR dir = NORTH;
+
+char com[MAX_ROUTE_COMMAND];
+int commandLength = 0;
+bool routeOverflow = false;
 
 int threshold = 300;
-
-int indexCmd = 0;
-
 int baseSpeed = 50;
+int intersectionCenterDelayMs = 950;
 
-float KpTrace = 0.4;
-float KpTurn = 2.0;
 float KpGap = 1.5;
 
+const int TURN_SPEED = 100;
+const float TURN_TOLERANCE_DEG = 1.0;
+const unsigned long TURN_TIMEOUT_MS = 6000;
+const unsigned long BLOCK_TIMEOUT_MS = 15000;
+const unsigned long GAP_TIMEOUT_MS = 5000;
 
-// ライントレース
+int indexCmd = 0;
+float baseAngle = 0.0;
 
+//==================================================
+// 経路生成
+//==================================================
 
-void lineTrace(){
-    reflectances.update();
-
-    int error =
-        reflectances.value(3)
-        - reflectances.value(4);
-
-    int correction =
-        (int)(KpTrace * error);
-
-    motors.setSpeeds(
-        baseSpeed - correction,
-        baseSpeed + correction
-    );
-}
-
-
-// ライン消失判定
-
-
-bool lineLost(){
-    reflectances.update();
-    for(int i=1;i<=6;i++){
-        if(reflectances.value(i) > threshold){
-            return false;
-        }
-    }
-    return true;
-}
-
-
-// 交差点判定
-
-
-bool detectIntersection(){
-    reflectances.update();
-    if(
-        reflectances.value(2) > threshold ||
-        reflectances.value(5) > threshold
-    ){
-        return true;
-    }
+bool addRouteCommand(char command)
+{
+  if (commandLength >= MAX_ROUTE_COMMAND - 1)
+  {
+    routeOverflow = true;
     return false;
+  }
+
+  com[commandLength++] = command;
+  com[commandLength] = '\0';
+  return true;
 }
 
+int directionX(DIR direction)
+{
+  if (direction == EAST) return 1;
+  if (direction == WEST) return -1;
+  return 0;
+}
 
-// 現在座標更新
+int directionY(DIR direction)
+{
+  if (direction == NORTH) return 1;
+  if (direction == SOUTH) return -1;
+  return 0;
+}
 
+void addTurnCommands(DIR target, DIR *planningDir)
+{
+  int diff = (target - *planningDir + 4) % 4;
 
-void updatePosition(){
-    switch(dir){
-        case NORTH:
-            cur.y++;
-            break;
+  if (diff == 1)
+  {
+    addRouteCommand('r');
+  }
+  else if (diff == 2)
+  {
+    addRouteCommand('r');
+    addRouteCommand('r');
+  }
+  else if (diff == 3)
+  {
+    addRouteCommand('l');
+  }
 
-        case SOUTH:
-            cur.y--;
-            break;
+  *planningDir = target;
+}
 
-        case EAST:
-            cur.x++;
-            break;
+void addMoves(DIR target, int count, DIR *planningDir)
+{
+  if (count <= 0 || routeOverflow)
+  {
+    return;
+  }
 
-        case WEST:
-            cur.x--;
-            break;
+  addTurnCommands(target, planningDir);
+
+  for (int i = 0; i < count && !routeOverflow; i++)
+  {
+    addRouteCommand('f');
+  }
+}
+
+void addXMoves(int dx, DIR *planningDir)
+{
+  if (dx > 0)
+  {
+    addMoves(EAST, dx, planningDir);
+  }
+  else if (dx < 0)
+  {
+    addMoves(WEST, -dx, planningDir);
+  }
+}
+
+void addYMoves(int dy, DIR *planningDir)
+{
+  if (dy > 0)
+  {
+    addMoves(NORTH, dy, planningDir);
+  }
+  else if (dy < 0)
+  {
+    addMoves(SOUTH, -dy, planningDir);
+  }
+}
+
+// 現在向いている方向に近い軸を先に選び、マンハッタン距離が
+// 最短のまま旋回回数も少なくなるようにする。
+void createRouteOneSection(vec start, vec destination, DIR *planningDir)
+{
+  int dx = destination.x - start.x;
+  int dy = destination.y - start.y;
+
+  if (dx == 0)
+  {
+    addYMoves(dy, planningDir);
+    return;
+  }
+
+  if (dy == 0)
+  {
+    addXMoves(dx, planningDir);
+    return;
+  }
+
+  int xPriority = directionX(*planningDir) * dx;
+  int yPriority = directionY(*planningDir) * dy;
+
+  if (xPriority > yPriority)
+  {
+    addXMoves(dx, planningDir);
+    addYMoves(dy, planningDir);
+  }
+  else
+  {
+    addYMoves(dy, planningDir);
+    addXMoves(dx, planningDir);
+  }
+}
+
+bool makeRoute()
+{
+  commandLength = 0;
+  com[0] = '\0';
+  routeOverflow = false;
+
+  // ロボットは交差点0の下からスタートするため、
+  // 最初に交差点0まで進む接近用の直進を追加する。
+  addRouteCommand('f');
+
+  vec routePosition = cur;
+  DIR planningDir = dir;
+
+  for (int i = 0; i < targetCount && !routeOverflow; i++)
+  {
+    vec destination;
+    labelToVec(targetLabels[i], &destination);
+
+    createRouteOneSection(routePosition, destination, &planningDir);
+    routePosition = destination;
+  }
+
+  if (routeOverflow)
+  {
+    commandLength = 0;
+    com[0] = '\0';
+    Serial.println(F("ERROR: Generated route is too long."));
+    return false;
+  }
+
+  goal = routePosition;
+
+  Serial.print(F("Generated route: "));
+  Serial.println(com);
+  Serial.print(F("Final goal: "));
+  Serial.print(goal.x);
+  Serial.print(F(","));
+  Serial.println(goal.y);
+
+  return true;
+}
+
+//==================================================
+// センサ・ライントレース
+//==================================================
+
+void lineTrace()
+{
+  reflectances.update();
+
+  int error = reflectances.value(3) - reflectances.value(4);
+  int correction = error / 7;
+
+  motors.setSpeeds(
+    baseSpeed - correction,
+    baseSpeed + correction
+  );
+}
+
+bool lineLost()
+{
+  reflectances.update();
+
+  for (int i = 1; i <= 6; i++)
+  {
+    if (reflectances.value(i) > threshold)
+    {
+      return false;
     }
+  }
+
+  return true;
 }
 
+bool detectIntersection()
+{
+  reflectances.update();
 
-// ゴール判定
-
-
-bool goalCheck(){
-    return (
-        cur.x == goal.x &&
-        cur.y == goal.y
-    );
+  return (
+    reflectances.value(2) > threshold ||
+    reflectances.value(5) > threshold
+  );
 }
 
+//==================================================
+// 座標・方角
+//==================================================
 
-// 地磁気方位取得
+void updatePosition()
+{
+  switch (dir)
+  {
+    case NORTH: cur.y++; break;
+    case EAST:  cur.x++; break;
+    case SOUTH: cur.y--; break;
+    case WEST:  cur.x--; break;
+  }
+}
 
+bool goalCheck()
+{
+  return cur.x == goal.x && cur.y == goal.y;
+}
+
+float normalizeHeading(float heading)
+{
+  while (heading < 0.0)
+  {
+    heading += 360.0;
+  }
+
+  while (heading >= 360.0)
+  {
+    heading -= 360.0;
+  }
+
+  return heading;
+}
 
 float getHeading()
 {
-    float h = imu.averageCompassHeading();
+  return normalizeHeading(imu.averageCompassHeading());
+}
 
-    if (h < 0.0)
+void recordBaseHeading()
+{
+  baseAngle = getHeading();
+  dir = NORTH;
+
+  Serial.print(F("Start heading: "));
+  Serial.println(baseAngle);
+}
+
+float headingForDirection(DIR target)
+{
+  return normalizeHeading(baseAngle + 90.0 * (int)target);
+}
+
+float shortestHeadingError(float target, float current)
+{
+  float error = target - current;
+
+  if (error > 180.0)
+  {
+    error -= 360.0;
+  }
+  else if (error < -180.0)
+  {
+    error += 360.0;
+  }
+
+  return error;
+}
+
+bool rotateToDirection(DIR target)
+{
+  float targetHeading = headingForDirection(target);
+  unsigned long startedAt = millis();
+
+  // キャリブレーション済みの地磁気方位と目標方位を比較し、
+  // 一定速度で単純にその場旋回する。
+  while (true)
+  {
+    float heading = getHeading();
+    float error = shortestHeadingError(targetHeading, heading);
+
+    if (abs(error) <= TURN_TOLERANCE_DEG)
     {
-        h += 360.0;
+      motors.setSpeeds(0, 0);
+      dir = target;
+      return true;
     }
 
-    if (h >= 360.0)
+    if (millis() - startedAt > TURN_TIMEOUT_MS)
     {
-        h -= 360.0;
+      motors.setSpeeds(0, 0);
+      Serial.println(F("ERROR: Turn timeout."));
+      return false;
     }
 
-    return h;
-}
-
-
-// 右旋回
-
-
-void turnRight(){
-    float startHeading =
-        getHeading();
-
-    float targetHeading =
-        startHeading + 90.0;
-
-    if(targetHeading >= 360.0){
-        targetHeading -= 360.0;
-    }
-
-    while(1){
-        float heading = getHeading();
-        float error = targetHeading - heading;
-
-        if(error > 180){
-            error -= 360;
-        }
-
-        if(error < -180){
-            error += 360;
-        }
-
-        if(abs(error) < 3){
-            break;
-        }
-
-        int turnSpeed =
-            KpTurn * error;
-
-        motors.setSpeeds(
-            turnSpeed,
-            -turnSpeed
-        );
-    }
-
-    motors.setSpeeds(0,0);
-    switch(dir)
+    if (error > 0.0)
     {
-        case NORTH: dir = EAST; break;
-        case EAST:  dir = SOUTH; break;
-        case SOUTH: dir = WEST; break;
-        case WEST:  dir = NORTH; break;
+      motors.setSpeeds(TURN_SPEED, -TURN_SPEED);
     }
+    else
+    {
+      motors.setSpeeds(-TURN_SPEED, TURN_SPEED);
+    }
+  }
 }
 
-
-// 左旋回
-
-
-void turnLeft(){
-    float startHeading =
-        getHeading();
-
-    float targetHeading =
-        startHeading - 90.0;
-
-    if(targetHeading < 0.0){
-        targetHeading += 360.0;
-    }
-
-    while(1){
-        float heading =
-            getHeading();
-
-        float error =
-            targetHeading - heading;
-
-        if(error > 180){
-            error -= 360;
-        }
-
-        if(error < -180){
-            error += 360;
-        }
-
-        if(abs(error) < 3){
-            break;
-        }
-
-        int turnSpeed =
-            KpTurn * error;
-
-        motors.setSpeeds(
-            turnSpeed,
-            -turnSpeed
-        );
-    }
-    motors.setSpeeds(0,0);
-    switch(dir){
-        case NORTH: dir = WEST; break;
-        case WEST:  dir = SOUTH; break;
-        case SOUTH: dir = EAST; break;
-        case EAST:  dir = NORTH; break;
-    }
+bool turnRight()
+{
+  DIR target = (DIR)((dir + 1) % 4);
+  return rotateToDirection(target);
 }
 
-
-// 欠線区間走行
-
-
-void gapDrive(){
-    imu.turnSensorReset();
-    while(lineLost()){
-        imu.turnSensorUpdate();
-        float yaw = imu.turnSensorAngleDegree();
-        float error = 0.0 - yaw;
-        int correction = KpGap * error;
-        motors.setSpeeds(
-            baseSpeed - correction,
-            baseSpeed + correction
-        );
-
-        reflectances.update();
-
-        if(
-            reflectances.value(3) > threshold ||
-            reflectances.value(4) > threshold
-        ){
-            break;
-        }
-    }
+bool turnLeft()
+{
+  DIR target = (DIR)((dir + 3) % 4);
+  return rotateToDirection(target);
 }
 
+//==================================================
+// 欠線区間・1区間走行
+//==================================================
 
-// 到着処理
+bool gapDrive()
+{
+  unsigned long startedAt = millis();
+  imu.turnSensorReset();
 
-
-void goalAction(){
-    motors.setSpeeds(0,0);
-    buzzer.playOn();
-    for(int i=0;i<10;i++){
-        led.on();
-        delay(200);
-
-        led.off();
-        delay(200);
-    }
-}
-
-
-// メイン運行
-
-
-void runRoute(){
-    indexCmd = 0;
-    while(1){
-        if(goalCheck()){
-            goalAction();
-            break;
-        }
-        reflectances.update();
-        if(lineLost()){
-            gapDrive();
-        }
-
-        if(!detectIntersection()){
-            lineTrace();
-            continue;
-        }
-
-        delay(300);
-
-        updatePosition();
-
-        if(goalCheck()){
-            goalAction();
-            break;
-        }
-
-        switch(com[indexCmd]){
-            case 'f':
-                indexCmd++;
-                break;
-
-            case 'r':
-                turnRight();
-                indexCmd++;
-                break;
-
-            case 'l':
-                turnLeft();
-                indexCmd++;
-                break;
-
-            case '\0':
-                goalAction();
-                return;
-        }
+  while (lineLost())
+  {
+    if (millis() - startedAt > GAP_TIMEOUT_MS)
+    {
+      motors.setSpeeds(0, 0);
+      Serial.println(F("ERROR: Line was not found."));
+      return false;
     }
 
-    while(1);
+    imu.turnSensorUpdate();
+
+    float yaw = imu.turnSensorAngleDegree();
+    int correction = (int)(KpGap * (0.0 - yaw));
+
+    motors.setSpeeds(
+      baseSpeed - correction,
+      baseSpeed + correction
+    );
+  }
+
+  return true;
 }
 
-//キャリブレーション
+bool driveOneBlock(bool centerAndStop)
+{
+  unsigned long startedAt = millis();
+  bool leftStartIntersection = false;
+
+  while (true)
+  {
+    if (millis() - startedAt > BLOCK_TIMEOUT_MS)
+    {
+      motors.setSpeeds(0, 0);
+      Serial.println(F("ERROR: Intersection timeout."));
+      return false;
+    }
+
+    if (lineLost())
+    {
+      if (!gapDrive())
+      {
+        return false;
+      }
+    }
+
+    bool intersection = detectIntersection();
+
+    if (!leftStartIntersection)
+    {
+      if (intersection)
+      {
+        motors.setSpeeds(baseSpeed, baseSpeed);
+      }
+      else
+      {
+        leftStartIntersection = true;
+        lineTrace();
+      }
+
+      continue;
+    }
+
+    if (intersection)
+    {
+      if (centerAndStop)
+      {
+        // 旋回前または最終地点では交差点中心付近まで進む。
+        motors.setSpeeds(baseSpeed, baseSpeed);
+        delay(intersectionCenterDelayMs);
+        motors.setSpeeds(0, 0);
+      }
+
+      return true;
+    }
+
+    lineTrace();
+  }
+}
+
+//==================================================
+// 終了処理・メイン運行
+//==================================================
+
+void finishAction(bool success)
+{
+  motors.setSpeeds(0, 0);
+  buzzer.playOn();
+
+  if (success)
+  {
+    Serial.println(F("All route commands completed."));
+  }
+  else
+  {
+    Serial.println(F("Running stopped because of an error."));
+  }
+
+  for (int i = 0; i < 10; i++)
+  {
+    led.on();
+    delay(200);
+    led.off();
+    delay(200);
+  }
+}
+
+void runRoute()
+{
+  indexCmd = 0;
+  bool success = true;
+  bool approachingStart = true;
+
+  while (com[indexCmd] != '\0')
+  {
+    // 旋回命令は現在の交差点で先に実行する。
+    while (com[indexCmd] == 'r' || com[indexCmd] == 'l')
+    {
+      bool turned;
+
+      if (com[indexCmd] == 'r')
+      {
+        turned = turnRight();
+      }
+      else
+      {
+        turned = turnLeft();
+      }
+
+      if (!turned)
+      {
+        success = false;
+        break;
+      }
+
+      indexCmd++;
+    }
+
+    if (!success || com[indexCmd] == '\0')
+    {
+      break;
+    }
+
+    if (com[indexCmd] != 'f')
+    {
+      Serial.println(F("ERROR: Invalid generated route."));
+      success = false;
+      break;
+    }
+
+    // 次も直進なら停止せず交差線を通過する。
+    // 旋回前と最終地点だけ交差点中心で停止する。
+    bool centerAndStop = com[indexCmd + 1] != 'f';
+
+    if (!driveOneBlock(centerAndStop))
+    {
+      success = false;
+      break;
+    }
+
+    if (approachingStart)
+    {
+      // 最初のfはコース外から交差点0へ入るための命令なので、
+      // グリッド内の現在座標は更新しない。
+      approachingStart = false;
+    }
+    else
+    {
+      updatePosition();
+    }
+
+    indexCmd++;
+  }
+
+  if (success && !goalCheck())
+  {
+    Serial.println(F("ERROR: Final position does not match the goal."));
+    success = false;
+  }
+
+  finishAction(success);
+}
+
+//==================================================
+// 地磁気センサーのキャリブレーション
+//==================================================
 
 void calibrateCompass()
 {
-    Serial.println("starting calibration");
+  Serial.println(F("Starting compass calibration."));
 
-    imu.configureForCompassHeading();
+  imu.configureForCompassHeading();
+  imu.doCompassCalibration();
 
-    imu.doCompassCalibration();
+  Serial.print(F("max.x: "));
+  Serial.println(imu.m_max.x);
+  Serial.print(F("max.y: "));
+  Serial.println(imu.m_max.y);
+  Serial.print(F("min.x: "));
+  Serial.println(imu.m_min.x);
+  Serial.print(F("min.y: "));
+  Serial.println(imu.m_min.y);
 
-    Serial.print("max.x   ");
-    Serial.println(imu.m_max.x);
+  Serial.println(F("Compass calibration finished."));
+}
 
-    Serial.print("max.y   ");
-    Serial.println(imu.m_max.y);
+//==================================================
+// ProgramA.ino から呼び出す運行関数
+//==================================================
 
-    Serial.print("min.x   ");
-    Serial.println(imu.m_min.x);
+void runOperation()
+{
+  mode = ROUTE_GENERATION_MODE;
+  Serial.println(F("===== Route Generation Mode ====="));
 
-    Serial.print("min.y   ");
-    Serial.println(imu.m_min.y);
+  if (!makeRoute())
+  {
+    return;
+  }
 
-    Serial.println("calibration finished");
+  Serial.println(F("Push button to calibrate the compass."));
+  button.waitForButton();
+  calibrateCompass();
+
+  Serial.println(F("Keep the robot still for gap-driving gyro calibration."));
+  imu.configureForTurnSensing();
+
+  mode = RUN_MODE;
+  Serial.println(F("===== Run Mode ====="));
+  Serial.println(F("Push button to start."));
+  button.waitForButton();
+
+  // この向きをコース上の論理的な北方向として記録する。
+  // 地磁気上の北がコースの上方向である必要はない。
+  recordBaseHeading();
+
+  buzzer.playOn();
+  Serial.println(F("Start running."));
+
+  runRoute();
 }
