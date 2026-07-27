@@ -25,7 +25,7 @@ float KpGap = 1.5;
 
 const int TURN_SPEED = 100;
 const float TURN_TOLERANCE_DEG = 1.0;
-const unsigned long TURN_TIMEOUT_MS = 6000;
+const unsigned long TURN_TIMEOUT_MS = 8000;
 const unsigned long BLOCK_TIMEOUT_MS = 15000;
 const unsigned long GAP_TIMEOUT_MS = 5000;
 
