@@ -9,8 +9,8 @@ MODE mode = COMMAND_INPUT_MODE;
 char targetLabels[MAX_TARGET + 1];
 int targetCount = 0;
 
-// ProgramB.ino に実装された運行関数
-extern void runOperation(void);
+// ProgramC.ino に実装された経路生成関数
+extern void runRouteGeneration(void);
 
 //==================================================
 // 地点名を座標に変換
@@ -160,8 +160,8 @@ void loop()
 {
   if (mode == ROUTE_GENERATION_MODE)
   {
-    // 入力完了後の経路生成・校正・走行はProgramBへ任せる。
-    runOperation();
+    // 入力完了後の経路生成はProgramCへ任せる。
+    runRouteGeneration();
     mode = FINISHED_MODE;
   }
 }

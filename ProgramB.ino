@@ -2,31 +2,23 @@
 #include <ZumoShieldN.h>
 #include "ProgramTypes.h"
 
-#define MAX_ROUTE_COMMAND 160
-
-extern char targetLabels[];
-extern int targetCount;
 extern MODE mode;
-extern bool labelToVec(char label, vec *p);
+extern char com[];
 
 vec cur = {0, 0};
 vec goal = {0, 0};
 DIR dir = NORTH;
 
-char com[MAX_ROUTE_COMMAND];
-int commandLength = 0;
-bool routeOverflow = false;
-
 int threshold = 300;
-int baseSpeed = 50;
-int intersectionCenterDelayMs = 950;
+int baseSpeed = 60;
+int intersectionCenterDelayMs = 970;
 
-float KpGap = 1.5;
+float KpGap = 2.0;
 
-const int TURN_SPEED = 100;
+const int TURN_SPEED = 120;
 const float TURN_TOLERANCE_DEG = 1.0;
 const float GYRO_TURN_ANGLE_DEG = 90.0;
-const float GYRO_TURN_TOLERANCE_DEG = 2.0;
+const float GYRO_TURN_TOLERANCE_DEG = 3.0;
 const unsigned long TURN_SETTLE_MS = 150;
 const unsigned long TURN_TIMEOUT_MS = 8000;
 const unsigned long BLOCK_TIMEOUT_MS = 15000;
@@ -34,173 +26,6 @@ const unsigned long GAP_TIMEOUT_MS = 5000;
 
 int indexCmd = 0;
 float baseAngle = 0.0;
-
-//==================================================
-// 経路生成
-//==================================================
-
-bool addRouteCommand(char command)
-{
-  if (commandLength >= MAX_ROUTE_COMMAND - 1)
-  {
-    routeOverflow = true;
-    return false;
-  }
-
-  com[commandLength++] = command;
-  com[commandLength] = '\0';
-  return true;
-}
-
-int directionX(DIR direction)
-{
-  if (direction == EAST) return 1;
-  if (direction == WEST) return -1;
-  return 0;
-}
-
-int directionY(DIR direction)
-{
-  if (direction == NORTH) return 1;
-  if (direction == SOUTH) return -1;
-  return 0;
-}
-
-void addTurnCommands(DIR target, DIR *planningDir)
-{
-  int diff = (target - *planningDir + 4) % 4;
-
-  if (diff == 1)
-  {
-    addRouteCommand('r');
-  }
-  else if (diff == 2)
-  {
-    addRouteCommand('r');
-    addRouteCommand('r');
-  }
-  else if (diff == 3)
-  {
-    addRouteCommand('l');
-  }
-
-  *planningDir = target;
-}
-
-void addMoves(DIR target, int count, DIR *planningDir)
-{
-  if (count <= 0 || routeOverflow)
-  {
-    return;
-  }
-
-  addTurnCommands(target, planningDir);
-
-  for (int i = 0; i < count && !routeOverflow; i++)
-  {
-    addRouteCommand('f');
-  }
-}
-
-void addXMoves(int dx, DIR *planningDir)
-{
-  if (dx > 0)
-  {
-    addMoves(EAST, dx, planningDir);
-  }
-  else if (dx < 0)
-  {
-    addMoves(WEST, -dx, planningDir);
-  }
-}
-
-void addYMoves(int dy, DIR *planningDir)
-{
-  if (dy > 0)
-  {
-    addMoves(NORTH, dy, planningDir);
-  }
-  else if (dy < 0)
-  {
-    addMoves(SOUTH, -dy, planningDir);
-  }
-}
-
-// 現在向いている方向に近い軸を先に選び、マンハッタン距離が
-// 最短のまま旋回回数も少なくなるようにする。
-void createRouteOneSection(vec start, vec destination, DIR *planningDir)
-{
-  int dx = destination.x - start.x;
-  int dy = destination.y - start.y;
-
-  if (dx == 0)
-  {
-    addYMoves(dy, planningDir);
-    return;
-  }
-
-  if (dy == 0)
-  {
-    addXMoves(dx, planningDir);
-    return;
-  }
-
-  int xPriority = directionX(*planningDir) * dx;
-  int yPriority = directionY(*planningDir) * dy;
-
-  if (xPriority > yPriority)
-  {
-    addXMoves(dx, planningDir);
-    addYMoves(dy, planningDir);
-  }
-  else
-  {
-    addYMoves(dy, planningDir);
-    addXMoves(dx, planningDir);
-  }
-}
-
-bool makeRoute()
-{
-  commandLength = 0;
-  com[0] = '\0';
-  routeOverflow = false;
-
-  // ロボットは交差点0の下からスタートするため、
-  // 最初に交差点0まで進む接近用の直進を追加する。
-  addRouteCommand('f');
-
-  vec routePosition = cur;
-  DIR planningDir = dir;
-
-  for (int i = 0; i < targetCount && !routeOverflow; i++)
-  {
-    vec destination;
-    labelToVec(targetLabels[i], &destination);
-
-    createRouteOneSection(routePosition, destination, &planningDir);
-    routePosition = destination;
-  }
-
-  if (routeOverflow)
-  {
-    commandLength = 0;
-    com[0] = '\0';
-    Serial.println(F("ERROR: Generated route is too long."));
-    return false;
-  }
-
-  goal = routePosition;
-
-  Serial.print(F("Generated route: "));
-  Serial.println(com);
-  Serial.print(F("Final goal: "));
-  Serial.print(goal.x);
-  Serial.print(F(","));
-  Serial.println(goal.y);
-
-  return true;
-}
 
 //==================================================
 // センサ・ライントレース
@@ -211,7 +36,7 @@ void lineTrace()
   reflectances.update();
 
   int error = reflectances.value(3) - reflectances.value(4);
-  int correction = error / 7;
+  int correction = error / 5;
 
   motors.setSpeeds(
     baseSpeed - correction,
@@ -451,16 +276,14 @@ bool driveOneBlock(bool centerAndStop)
 
     if (!leftStartIntersection)
     {
-      if (intersection)
-      {
-        motors.setSpeeds(baseSpeed, baseSpeed);
-      }
-      else
+      // 出発側の交差点を抜けるまでは次の交差点として数えない。
+      // ただし旋回終了直後からライン補正は停止させない。
+      if (!intersection)
       {
         leftStartIntersection = true;
-        lineTrace();
       }
 
+      lineTrace();
       continue;
     }
 
@@ -613,14 +436,6 @@ void calibrateCompass()
 
 void runOperation()
 {
-  mode = ROUTE_GENERATION_MODE;
-  Serial.println(F("===== Route Generation Mode ====="));
-
-  if (!makeRoute())
-  {
-    return;
-  }
-
   Serial.println(F("Push button to calibrate the compass."));
   button.waitForButton();
   calibrateCompass();
